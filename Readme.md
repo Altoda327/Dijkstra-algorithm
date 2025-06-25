@@ -61,7 +61,7 @@ The CSV data is derived from OpenStreetMap (OSM) files:
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd dijkstra-osm-pathfinding
+cd Dijkstra-algorithm
 
 # Build the project
 make all
@@ -165,3 +165,7 @@ The parser includes robust error handling:
 - Handles missing or malformed data gracefully
 - Reports parsing warnings and statistics
 - Verifies node references in edges
+
+## Visualization
+
+The GPX export allows visualization of calculated routes in GPS software or mapping applications. The GPX format is widely supported and can be used with tools like gpx.studio, JOSM, or any GPS device that supports GPX files.

@@ -1,132 +1,198 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <float.h>
-#include "csv_parser.h"
+#include <stdint.h>
+#include <math.h>
+#include "bin_loader.h"
 #include "dijkstra.h"
+#include "graph.h"
 #include "utils.h"
 
-#define INFINITY_DBL DBL_MAX
+// =================
+// Main function
+// =================
 
-/**
- * Display distances from source to all reachable nodes
- */
-static void display_all_distances(Graph *graph, DijkstraResult *result, int source_id) {
-    printf("\nDistances from node %d to all reachable nodes:\n", source_id);
-    printf("=================================================\n");
-    
-    int reachable_count = 0;
-    
-    for (int i = 0; i < graph->num_nodes; i++) {
-        // Skip unreachable nodes (infinite distance)
-        if (result->distances[i] == INFINITY_DBL) {
-            continue;
-        }
-        
-        Node *node = &graph->nodes[i];
-        printf("Node %d: %s\n", node->id, format_distance(result->distances[i]));
-        reachable_count++;
-    }
-    
-    printf("\nTotal reachable nodes: %d out of %d\n", reachable_count, graph->num_nodes);
-}
-
-/**
- * Display shortest path and optionally export to GPX file
- */
-static void display_and_export_path(Graph *graph, DijkstraResult *result, 
-                                  int target_id, const char *gpx_filename) {
-    printf("\nShortest path to node %d:\n", target_id);
-    printf("========================\n");
-    
-    // Display path information
-    print_shortest_path(graph, result, target_id);
-    
-    // Export to GPX if filename is provided
-    if (gpx_filename) {
-        int path_length;
-        int *path = get_path_to_node(graph, result, target_id, &path_length);
-        
-        if (path && path_length > 0) {
-            if (export_path_to_gpx(graph, path, path_length, gpx_filename) == 0) {
-                printf("Route successfully exported to: %s\n", gpx_filename);
-            } else {
-                fprintf(stderr, "Warning: Failed to export route to GPX file\n");
-            }
-            free(path);
-        } else {
-            fprintf(stderr, "Warning: Cannot export empty or invalid path\n");
-        }
-    }
-}
-
-/**
- * Main program entry point - handles command line arguments and orchestrates execution
- */
 int main(int argc, char *argv[]) {
-    // Check minimum required arguments
-    if (argc < 4) {
-        print_usage(argv[0]);
-        return 1;
+  // Check command line arguments - minimum required: program nodes_file edges_file
+  if (argc < 3) {
+    print_usage(argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  // Parse command line arguments
+  const char *nodes_file = argv[1];
+  const char *edges_file = argv[2];
+
+  // Initialize variables for different execution modes
+  bool coordinate_mode = false;
+  uint32_t source_id = 0;
+  uint32_t target_id = 0;
+  const char *gpx_file = NULL;
+
+  // Parse optional arguments to determine execution mode
+  if (argc >= 4 && strcmp(argv[3], "-c") == 0) {
+    // Coordinate mode: user will input coordinates interactively
+    coordinate_mode = true;
+    gpx_file = (argc >= 5) ? argv[4] : NULL;
+  } else if (argc >= 5) {
+    // Direct node ID mode: source and target specified as arguments
+    source_id = (uint32_t)atoi(argv[3]);
+    target_id = (uint32_t)atoi(argv[4]);
+    gpx_file = (argc >= 6) ? argv[5] : NULL;
+  } else {
+    // Invalid arguments provided
+    print_usage(argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  // Display program header and file information
+  printf("\n=== GRAPH LOADER ===\n");
+  printf("Loading graph from files:\n");
+  printf("  Nodes: %s\n", nodes_file);
+  printf("  Edges: %s\n", edges_file);
+
+  // Initialize error handling system
+  error_info_t err_info;
+  error_code_t err_code;
+
+  // Load the graph from binary files into memory
+  Graph *graph = NULL;
+  err_code = load_graph_from_binary(&graph, nodes_file, edges_file, &err_info);
+  if (err_code != ERR_SUCCESS) {
+    print_error(&err_info);
+    return EXIT_FAILURE;
+  }
+
+  // Display comprehensive graph statistics and memory usage
+  printf("\n=== GRAPH SUMMARY ===\n");
+  printf("Total nodes: %d\n", graph->num_nodes);
+  printf("Total edges: %d\n", graph->num_edges);
+  printf("Memory usage:\n");
+  printf("  Nodes: %.2f MB\n", (double)(graph->num_nodes * 
+        sizeof(Node)) / (1024 * 1024));
+  printf("  Edges: %.2f MB\n", (double)(graph->num_edges *
+        sizeof(Edge)) / (1024 * 1024));
+  printf("  CSR: %.2f MB\n", (double)((graph->num_nodes + graph->num_edges) *
+        sizeof(int)) / (1024 * 1024));
+  printf("  Hash Table: %.2f MB\n", (double)(graph->node_hash->size *
+        sizeof(NodeHashEntry *)) / (1024 * 1024));
+
+  // Display hash table performance statistics
+  print_hash_table_stats(graph);
+
+  // Handle coordinate mode if enabled - allows user to input lat/lon coordinates
+  if (coordinate_mode) {
+    err_code = interactive_coordinate_mode(graph, &source_id, &target_id, &err_info);
+    if (err_code != ERR_SUCCESS) {
+      print_error(&err_info);
+      free_graph(graph);
+      return EXIT_FAILURE;
     }
-    
-    // Parse command line arguments
-    const char *nodes_file = argv[1];
-    const char *edges_file = argv[2];
-    int source_id = atoi(argv[3]);
-    int target_id = (argc > 4) ? atoi(argv[4]) : -1;
-    const char *gpx_filename = (argc > 5) ? argv[5] : NULL;
-    
-    // Validate source node ID
-    if (source_id <= 0) {
-        fprintf(stderr, "Error: Source node ID must be positive\n");
-        return 1;
+  }
+
+  // Prompt user to choose Dijkstra algorithm mode
+  char buffer[32];
+  int dijkstra_mode;
+  printf("\nChoose Dijkstra mode:\n");
+  printf("  1. Dijkstra shortest distance\n");
+  printf("  2. Dijkstra fastest path\n");
+  printf("Enter choice (1 or 2): ");
+
+  // Read and validate user input for Dijkstra mode
+  if (fgets(buffer, sizeof(buffer), stdin)) {
+    buffer[strcspn(buffer, "\n")] = 0; // Remove newline character
+    if (sscanf(buffer, "%d", &dijkstra_mode) != 1 || 
+        (dijkstra_mode != 1 && dijkstra_mode != 2)) {
+      fprintf(stderr, "Invalid choice. Please enter 1 or 2.\n");
+      free_graph(graph);
+      return EXIT_FAILURE;
     }
-    
-    // Load graph from CSV files
-    printf("Loading graph from CSV files...\n");
-    printf("Nodes file: %s\n", nodes_file);
-    printf("Edges file: %s\n", edges_file);
-    
-    Graph *graph = load_graph_from_csv(nodes_file, edges_file);
-    if (!graph) {
-        fprintf(stderr, "Error: Failed to load graph from CSV files\n");
-        return 1;
-    }
-    
-    printf("Graph loaded successfully:\n");
-    printf("- Nodes: %d\n", graph->num_nodes);
-    printf("- Edges: %d\n", graph->num_edges);
-    
-    // Execute Dijkstra's algorithm
-    printf("\nRunning Dijkstra's algorithm from node %d...\n", source_id);
-    
-    DijkstraResult *result = dijkstra(graph, source_id);
-    if (!result) {
-        fprintf(stderr, "Error: Failed to execute Dijkstra's algorithm\n");
-        free_graph(graph);
-        return 1;
-    }
-    
-    printf("Algorithm completed successfully.\n");
-    
-    // Display results based on whether target is specified
-    if (target_id != -1) {
-        // Show path to specific target node
-        display_and_export_path(graph, result, target_id, gpx_filename);
-    } else {
-        // Show distances to all reachable nodes
-        display_all_distances(graph, result, source_id);
-        
-        if (gpx_filename) {
-            printf("\nNote: GPX export requires a target node. Specify target_node_id to export route.\n");
-        }
-    }
-    
-    // Clean up allocated memory
-    free_dijkstra_result(result);
+  } else {
+    fprintf(stderr, "Error reading input.\n");
     free_graph(graph);
-    
-    printf("\nProgram completed successfully.\n");
-    return 0;
+    return EXIT_FAILURE;
+  }
+  DijkstraMode mode = (DijkstraMode)dijkstra_mode;
+
+  // Execute Dijkstra's algorithm to find shortest path
+  printf("\n=== RUNNING DIJKSTRA ===\n");
+  printf("Computing shortest path from node %d to node %d...\n", 
+      source_id, target_id);
+
+  DijkstraResult result;
+  err_code = dijkstra_shortest_path(graph, source_id, target_id, mode, &result, &err_info);
+  if (err_code != ERR_SUCCESS) {
+    print_error(&err_info);
+    free_graph(graph);
+    return EXIT_FAILURE;
+  }
+
+  // Process and display results
+  if (!result.target_found) {
+    printf("No path found from node %d to node %d.\n", source_id, target_id);
+  } else {
+    printf("Path found from node %d to node %d:\n", 
+        source_id, target_id);
+
+    // Extract the shortest distance/time from results
+    double distance;
+    err_code = get_shortest_distance(&result, &distance, &err_info);
+    if (err_code != ERR_SUCCESS) {
+      print_error(&err_info);
+      free_dijkstra_result(&result);
+      free_graph(graph);
+      return EXIT_FAILURE;
+    }
+
+    // Extract the actual path (sequence of nodes)
+    int path_length;
+    int *path;
+    err_code = get_shortest_path(graph, &result, &path_length, &path, &err_info);
+    if (err_code != ERR_SUCCESS) {
+      print_error(&err_info);
+      free_dijkstra_result(&result);
+      free_graph(graph);
+      return EXIT_FAILURE;
+    }
+
+    // Display path information with appropriate units
+    if (path && path_length > 0) {
+      printf("Path contains %d nodes.\n", path_length);
+
+      // Display results with appropriate units based on mode
+      if (mode == DIJKSTRA_FASTEST_TIME) {
+        if (distance >= 60) {
+          printf("Total time: %.2f Hours\n", distance / 60.0);
+        } else {
+          printf("Total time: %.2f Minutes\n", distance);
+        }
+      } else {
+        if (distance >= 1000) {
+          printf("Total distance: %.2f Km\n", distance / 1000.0);
+        } else {
+          printf("Total distance: %.2f Meters\n", distance);
+        }
+      }
+
+      // Export path to GPX file if filename was provided
+      if (gpx_file) {
+        err_code = export_path_to_gpx(graph, path, path_length, gpx_file, mode, &result, &err_info);
+        if (err_code != ERR_SUCCESS) {
+          print_error(&err_info);
+          free(path);
+          free_dijkstra_result(&result);
+          free_graph(graph);
+          return EXIT_FAILURE;
+        }
+        printf("Path exported to GPX file: %s\n", gpx_file);
+      }
+    }
+  }
+
+  // Clean up all allocated resources
+  free_dijkstra_result(&result);
+  free_graph(graph);
+
+  printf("\n=== ANALYSIS COMPLETE ===\n");
+  return EXIT_SUCCESS;
 }
